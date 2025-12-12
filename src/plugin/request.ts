@@ -5,11 +5,16 @@ import {
 } from "../constants";
 import { logAntigravityDebugResponse, type AntigravityDebugContext } from "./debug";
 import {
+  extractThinkingConfig,
   extractUsageFromSsePayload,
   extractUsageMetadata,
+  filterUnsignedThinkingBlocks,
+  isThinkingCapableModel,
   normalizeThinkingConfig,
   parseAntigravityApiBody,
+  resolveThinkingConfig,
   rewriteAntigravityPreviewAccessError,
+  transformThinkingParts,
   type AntigravityApiBody,
 } from "./request-helpers";
 
@@ -23,6 +28,7 @@ function generateSyntheticProjectId(): string {
 }
 
 const STREAM_ACTION = "streamGenerateContent";
+
 /**
  * Detects requests headed to the Google Generative Language API so we can intercept them.
  */
@@ -31,7 +37,8 @@ export function isGenerativeLanguageRequest(input: RequestInfo): input is string
 }
 
 /**
- * Rewrites SSE payloads so downstream consumers see only the inner `response` objects.
+ * Rewrites SSE payloads so downstream consumers see only the inner `response` objects,
+ * with thinking/reasoning blocks transformed to OpenCode's expected format.
  */
 function transformStreamingPayload(payload: string): string {
   return payload
@@ -47,7 +54,8 @@ function transformStreamingPayload(payload: string): string {
       try {
         const parsed = JSON.parse(json) as { response?: unknown };
         if (parsed.response !== undefined) {
-          return `data: ${JSON.stringify(parsed.response)}`;
+          const transformed = transformThinkingParts(parsed.response);
+          return `data: ${JSON.stringify(transformed)}`;
         }
       } catch (_) { }
       return line;
@@ -118,7 +126,21 @@ export function prepareAntigravityRequest(
         const requestPayload: Record<string, unknown> = { ...parsedBody };
 
         const rawGenerationConfig = requestPayload.generationConfig as Record<string, unknown> | undefined;
-        const normalizedThinking = normalizeThinkingConfig(rawGenerationConfig?.thinkingConfig);
+        const extraBody = requestPayload.extra_body as Record<string, unknown> | undefined;
+
+        // Resolve thinking configuration based on user settings and model capabilities
+        const userThinkingConfig = extractThinkingConfig(requestPayload, rawGenerationConfig, extraBody);
+        const hasAssistantHistory = Array.isArray(requestPayload.contents) &&
+          requestPayload.contents.some((c: any) => c?.role === "model" || c?.role === "assistant");
+
+        const finalThinkingConfig = resolveThinkingConfig(
+          userThinkingConfig,
+          isThinkingCapableModel(upstreamModel),
+          isClaudeModel,
+          hasAssistantHistory,
+        );
+
+        const normalizedThinking = normalizeThinkingConfig(finalThinkingConfig);
         if (normalizedThinking) {
           if (rawGenerationConfig) {
             rawGenerationConfig.thinkingConfig = normalizedThinking;
@@ -130,6 +152,14 @@ export function prepareAntigravityRequest(
           delete rawGenerationConfig.thinkingConfig;
           requestPayload.generationConfig = rawGenerationConfig;
         }
+
+        // Clean up thinking fields from extra_body
+        if (extraBody) {
+          delete extraBody.thinkingConfig;
+          delete extraBody.thinking;
+        }
+        delete requestPayload.thinkingConfig;
+        delete requestPayload.thinking;
 
         if ("system_instruction" in requestPayload) {
           requestPayload.systemInstruction = requestPayload.system_instruction;
@@ -305,6 +335,11 @@ export function prepareAntigravityRequest(
           } catch {
             toolDebugPayload = undefined;
           }
+        }
+
+        // For Claude models, filter out unsigned thinking blocks (required by Claude API)
+        if (isClaudeModel && Array.isArray(requestPayload.contents)) {
+          requestPayload.contents = filterUnsignedThinkingBlocks(requestPayload.contents);
         }
 
         // For Claude models, ensure functionCall/tool use parts carry IDs (required by Anthropic).
@@ -536,7 +571,8 @@ export async function transformAntigravityResponse(
     }
 
     if (effectiveBody?.response !== undefined) {
-      return new Response(JSON.stringify(effectiveBody.response), init);
+      const transformed = transformThinkingParts(effectiveBody.response);
+      return new Response(JSON.stringify(transformed), init);
     }
 
     if (patched) {
