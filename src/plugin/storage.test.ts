@@ -66,7 +66,7 @@ describe("deduplicateAccountsByEmail", () => {
     expect(bob?.refreshToken).toBe("bob-new");
   });
 
-  it("preserves order of kept accounts based on first occurrence", () => {
+  it("preserves order of kept accounts based on newest entry index", () => {
     const accounts: AccountMetadata[] = [
       { email: "first@example.com", refreshToken: "first-old", addedAt: 1000, lastUsed: 1000 },
       { email: "second@example.com", refreshToken: "second-new", addedAt: 3000, lastUsed: 3000 },
@@ -74,13 +74,7 @@ describe("deduplicateAccountsByEmail", () => {
     ];
     const result = deduplicateAccountsByEmail(accounts);
     expect(result).toHaveLength(2);
-    // first@example.com appears first in original array, so its kept entry should come first
-    // But we're keeping the index of the *newest* one, which is index 2
-    // Actually, kept entries are at indices 1 and 2, so order is second, first
-    // Let me verify the actual logic...
-    // The newest for first@example.com is at index 2
-    // The newest for second@example.com is at index 1
-    // indicesToKeep = {1, 2}, iterated in order: index 1 (second), index 2 (first)
+    // Kept entries are at indices 1 (second@) and 2 (first@), so order is second, first
     expect(result[0]?.email).toBe("second@example.com");
     expect(result[1]?.email).toBe("first@example.com");
   });
