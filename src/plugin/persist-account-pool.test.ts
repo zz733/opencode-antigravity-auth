@@ -13,6 +13,12 @@ import { promises as fs } from "node:fs";
 import * as storageModule from "./storage";
 import type { AccountStorageV3, AccountMetadataV3 } from "./storage";
 
+vi.mock("proper-lockfile", () => ({
+  default: {
+    lock: vi.fn().mockResolvedValue(vi.fn().mockResolvedValue(undefined)),
+  },
+}));
+
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
   return {
@@ -21,7 +27,7 @@ vi.mock("node:fs", async () => {
       readFile: vi.fn(),
       writeFile: vi.fn(),
       mkdir: vi.fn().mockResolvedValue(undefined),
-      access: vi.fn(),
+      access: vi.fn().mockResolvedValue(undefined),
       unlink: vi.fn(),
       rename: vi.fn().mockResolvedValue(undefined),
     },
