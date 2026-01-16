@@ -228,7 +228,7 @@ describe("transform/gemini", () => {
       });
     });
 
-    it("normalizes tool with function.input_schema", () => {
+    it("normalizes tool with function.input_schema to functionDeclarations format", () => {
       const payload: RequestPayload = {
         contents: [],
         tools: [
@@ -244,10 +244,13 @@ describe("transform/gemini", () => {
       const result = normalizeGeminiTools(payload);
       expect(result.toolDebugMissing).toBe(0);
       expect(result.toolDebugSummaries).toHaveLength(1);
-      expect((payload.tools as unknown[])[0]).not.toHaveProperty("custom");
+      const tools = payload.tools as any[];
+      expect(tools).toHaveLength(1);
+      expect(tools[0].functionDeclarations).toBeDefined();
+      expect(tools[0].functionDeclarations[0].name).toBe("test_tool");
     });
 
-    it("normalizes tool with function.parameters", () => {
+    it("normalizes tool with function.parameters to functionDeclarations format", () => {
       const payload: RequestPayload = {
         contents: [],
         tools: [
@@ -262,75 +265,67 @@ describe("transform/gemini", () => {
       };
       const result = normalizeGeminiTools(payload);
       expect(result.toolDebugMissing).toBe(0);
+      const tools = payload.tools as any[];
+      expect(tools[0].functionDeclarations[0].parameters.properties.bar).toBeDefined();
     });
 
-    it("creates custom from function and strips it for Gemini", () => {
-      const payload: RequestPayload = {
-        contents: [],
-        tools: [
-          {
-            function: {
-              name: "my_func",
-              description: "My function",
-              input_schema: { type: "object" },
-            },
-          },
-        ],
-      };
-      normalizeGeminiTools(payload);
-      expect((payload.tools as unknown[])[0]).not.toHaveProperty("custom");
-      expect((payload.tools as unknown[])[0]).toHaveProperty("function");
-    });
-
-    it("creates custom when both function and custom are missing", () => {
+    it("converts standalone tool to functionDeclarations format", () => {
       const payload: RequestPayload = {
         contents: [],
         tools: [
           {
             name: "standalone_tool",
             description: "A standalone tool",
-            parameters: { type: "object", properties: {} },
+            parameters: { type: "object", properties: { x: { type: "string" } } },
           },
         ],
       };
       normalizeGeminiTools(payload);
-      expect((payload.tools as unknown[])[0]).not.toHaveProperty("custom");
+      const tools = payload.tools as any[];
+      expect(tools[0].functionDeclarations).toBeDefined();
+      expect(tools[0].functionDeclarations[0].name).toBe("standalone_tool");
     });
 
-    it("counts missing schemas", () => {
+    it("counts missing schemas and adds placeholder", () => {
       const payload: RequestPayload = {
         contents: [],
         tools: [
           { name: "tool1" },
           { name: "tool2" },
-          { function: { name: "tool3", input_schema: { type: "object" } } },
+          { function: { name: "tool3", input_schema: { type: "object", properties: { a: { type: "string" } } } } },
         ],
       };
       const result = normalizeGeminiTools(payload);
       expect(result.toolDebugMissing).toBe(2);
+      const tools = payload.tools as any[];
+      expect(tools[0].functionDeclarations).toHaveLength(3);
+      // Tools without schema should have placeholder
+      expect(tools[0].functionDeclarations[0].parameters.properties._placeholder).toBeDefined();
+      expect(tools[0].functionDeclarations[1].parameters.properties._placeholder).toBeDefined();
     });
 
     it("generates debug summaries for each tool", () => {
       const payload: RequestPayload = {
         contents: [],
         tools: [
-          { function: { name: "t1", input_schema: { type: "object" } } },
-          { function: { name: "t2", input_schema: { type: "object" } } },
+          { function: { name: "t1", input_schema: { type: "object", properties: { x: { type: "string" } } } } },
+          { function: { name: "t2", input_schema: { type: "object", properties: { y: { type: "number" } } } } },
         ],
       };
       const result = normalizeGeminiTools(payload);
       expect(result.toolDebugSummaries).toHaveLength(2);
-      expect(result.toolDebugSummaries[0]).toContain("idx=0");
-      expect(result.toolDebugSummaries[1]).toContain("idx=1");
+      expect(result.toolDebugSummaries[0]).toContain("decl=t1");
+      expect(result.toolDebugSummaries[1]).toContain("decl=t2");
     });
 
     it("uses default tool name when name is missing", () => {
       const payload: RequestPayload = {
         contents: [],
-        tools: [{}],
+        tools: [{ parameters: { type: "object", properties: {} } }],
       };
       const result = normalizeGeminiTools(payload);
-      expect(result.toolDebugSummaries[0]).toContain("idx=0");
+      const tools = payload.tools as any[];
+      expect(tools[0].functionDeclarations[0].name).toBe("tool-0");
     });
 
     it("extracts schema from custom.input_schema", () => {
@@ -346,7 +341,8 @@ describe("transform/gemini", () => {
         ],
       };
       normalizeGeminiTools(payload);
-      expect((payload.tools as unknown[])[0]).not.toHaveProperty("custom");
+      const tools = payload.tools as any[];
+      expect(tools[0].functionDeclarations[0].name).toBe("custom_tool");
     });
 
     it("extracts schema from inputSchema (camelCase)", () => {
@@ -360,7 +356,39 @@ describe("transform/gemini", () => {
         ],
       };
       normalizeGeminiTools(payload);
-      expect((payload.tools as unknown[])[0]).not.toHaveProperty("custom");
+      const tools = payload.tools as any[];
+      expect(tools[0].functionDeclarations[0].name).toBe("camel_tool");
+    });
+
+    it("handles existing functionDeclarations format", () => {
+      const payload: RequestPayload = {
+        contents: [],
+        tools: [
+          {
+            functionDeclarations: [
+              { name: "existing_tool", description: "Already in correct format", parameters: { type: "object", properties: { a: { type: "string" } } } },
+            ],
+          },
+        ],
+      };
+      normalizeGeminiTools(payload);
+      const tools = payload.tools as any[];
+      expect(tools[0].functionDeclarations[0].name).toBe("existing_tool");
+    });
+
+    it("preserves passthrough tools like codeExecution", () => {
+      const payload: RequestPayload = {
+        contents: [],
+        tools: [
+          { function: { name: "func_tool", input_schema: { type: "object", properties: { x: { type: "string" } } } } },
+          { codeExecution: {} },
+        ],
+      };
+      normalizeGeminiTools(payload);
+      const tools = payload.tools as any[];
+      expect(tools).toHaveLength(2);
+      expect(tools[0].functionDeclarations).toBeDefined();
+      expect(tools[1].codeExecution).toBeDefined();
     });
   });
 

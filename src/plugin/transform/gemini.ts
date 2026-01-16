@@ -58,7 +58,7 @@ export function buildGemini25ThinkingConfig(
 
 /**
  * Normalize tools for Gemini models.
- * Ensures tools have proper function-style format.
+ * Converts various tool formats to functionDeclarations format (same as Claude).
  * 
  * @returns Debug info about tool normalization
  */
@@ -72,100 +72,127 @@ export function normalizeGeminiTools(
     return { toolDebugMissing, toolDebugSummaries };
   }
 
-  payload.tools = (payload.tools as unknown[]).map((tool: unknown, toolIndex: number) => {
-    const t = tool as Record<string, unknown>;
-    const newTool = { ...t };
+  const functionDeclarations: unknown[] = [];
+  const passthroughTools: unknown[] = [];
 
-    const schemaCandidates = [
-      (newTool.function as Record<string, unknown> | undefined)?.input_schema,
-      (newTool.function as Record<string, unknown> | undefined)?.parameters,
-      (newTool.function as Record<string, unknown> | undefined)?.inputSchema,
-      (newTool.custom as Record<string, unknown> | undefined)?.input_schema,
-      (newTool.custom as Record<string, unknown> | undefined)?.parameters,
-      newTool.parameters,
-      newTool.input_schema,
-      newTool.inputSchema,
-    ].filter(Boolean);
+  const placeholderSchema: Record<string, unknown> = {
+    type: "object",
+    properties: {
+      _placeholder: {
+        type: "boolean",
+        description: "Placeholder. Always pass true.",
+      },
+    },
+    required: ["_placeholder"],
+  };
 
-    const placeholderSchema: Record<string, unknown> = {
-      type: "object",
-      properties: {
+  const normalizeSchema = (schema: unknown): Record<string, unknown> => {
+    if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+      toolDebugMissing += 1;
+      return { ...placeholderSchema };
+    }
+
+    const cleaned = { ...(schema as Record<string, unknown>) };
+    
+    // Remove $schema field that Gemini doesn't accept
+    delete cleaned.$schema;
+
+    // Ensure type is object
+    cleaned.type = "object";
+
+    // Ensure properties exist
+    const hasProperties =
+      cleaned.properties &&
+      typeof cleaned.properties === "object" &&
+      Object.keys(cleaned.properties as Record<string, unknown>).length > 0;
+
+    if (!hasProperties) {
+      cleaned.properties = {
         _placeholder: {
           type: "boolean",
           description: "Placeholder. Always pass true.",
         },
-      },
-      required: ["_placeholder"],
-      additionalProperties: false,
+      };
+      cleaned.required = ["_placeholder"];
+    }
+
+    return cleaned;
+  };
+
+  (payload.tools as unknown[]).forEach((tool: unknown) => {
+    const t = tool as Record<string, unknown>;
+
+    const pushDeclaration = (decl: Record<string, unknown> | undefined, source: string): void => {
+      const schema =
+        decl?.parameters ||
+        decl?.parametersJsonSchema ||
+        decl?.input_schema ||
+        decl?.inputSchema ||
+        t.parameters ||
+        t.parametersJsonSchema ||
+        t.input_schema ||
+        t.inputSchema ||
+        (t.function as Record<string, unknown> | undefined)?.parameters ||
+        (t.function as Record<string, unknown> | undefined)?.input_schema ||
+        (t.custom as Record<string, unknown> | undefined)?.parameters ||
+        (t.custom as Record<string, unknown> | undefined)?.input_schema;
+
+      let name =
+        decl?.name ||
+        t.name ||
+        (t.function as Record<string, unknown> | undefined)?.name ||
+        (t.custom as Record<string, unknown> | undefined)?.name ||
+        `tool-${functionDeclarations.length}`;
+
+      // Sanitize tool name: must be alphanumeric with underscores
+      name = String(name).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+
+      const description =
+        decl?.description ||
+        t.description ||
+        (t.function as Record<string, unknown> | undefined)?.description ||
+        (t.custom as Record<string, unknown> | undefined)?.description ||
+        "";
+
+      functionDeclarations.push({
+        name,
+        description: String(description || ""),
+        parameters: normalizeSchema(schema),
+      });
+
+      toolDebugSummaries.push(
+        `decl=${name},src=${source},hasSchema=${schema ? "y" : "n"}`,
+      );
     };
 
-    let schema = schemaCandidates[0] as Record<string, unknown> | undefined;
-    const schemaObjectOk = schema && typeof schema === "object" && !Array.isArray(schema);
-    if (!schemaObjectOk) {
-      schema = placeholderSchema;
-      toolDebugMissing += 1;
+    // Check for functionDeclarations array first
+    if (Array.isArray(t.functionDeclarations) && (t.functionDeclarations as unknown[]).length > 0) {
+      (t.functionDeclarations as Record<string, unknown>[]).forEach((decl) => 
+        pushDeclaration(decl, "functionDeclarations")
+      );
+      return;
     }
 
-    const nameCandidate =
-      newTool.name ||
-      (newTool.function as Record<string, unknown> | undefined)?.name ||
-      (newTool.custom as Record<string, unknown> | undefined)?.name ||
-      `tool-${toolIndex}`;
-
-    // Ensure function has input_schema
-    if (newTool.function && !(newTool.function as Record<string, unknown>).input_schema && schema) {
-      (newTool.function as Record<string, unknown>).input_schema = schema;
-    }
-    
-    // Ensure custom has input_schema
-    if (newTool.custom && !(newTool.custom as Record<string, unknown>).input_schema && schema) {
-      (newTool.custom as Record<string, unknown>).input_schema = schema;
-    }
-    
-    // Create custom from function if missing
-    if (!newTool.custom && newTool.function) {
-      const fn = newTool.function as Record<string, unknown>;
-      newTool.custom = {
-        name: fn.name || nameCandidate,
-        description: fn.description,
-        input_schema: schema,
-      };
+    // Fall back to function/custom style definitions
+    if (t.function || t.custom || t.parameters || t.input_schema || t.inputSchema || t.name) {
+      pushDeclaration(
+        (t.function as Record<string, unknown> | undefined) ?? 
+        (t.custom as Record<string, unknown> | undefined) ?? 
+        t,
+        "function/custom"
+      );
+      return;
     }
 
-    // Create custom if both missing
-    if (!newTool.custom && !newTool.function) {
-      newTool.custom = {
-        name: nameCandidate,
-        description: newTool.description,
-        input_schema: schema,
-      };
-
-      if (!newTool.parameters && !newTool.input_schema && !newTool.inputSchema) {
-        newTool.parameters = schema;
-      }
-    }
-    
-    // Ensure custom has input_schema
-    if (newTool.custom && !(newTool.custom as Record<string, unknown>).input_schema) {
-      (newTool.custom as Record<string, unknown>).input_schema = { 
-        type: "object", 
-        properties: {}, 
-        additionalProperties: false 
-      };
-      toolDebugMissing += 1;
-    }
-
-    toolDebugSummaries.push(
-      `idx=${toolIndex}, hasCustom=${!!newTool.custom}, customSchema=${!!(newTool.custom as Record<string, unknown> | undefined)?.input_schema}, hasFunction=${!!newTool.function}, functionSchema=${!!(newTool.function as Record<string, unknown> | undefined)?.input_schema}`,
-    );
-
-    // Strip custom wrappers for Gemini; only function-style is accepted.
-    if (newTool.custom) {
-      delete newTool.custom;
-    }
-
-    return newTool;
+    // Preserve any non-function tool entries (e.g., codeExecution) untouched
+    passthroughTools.push(tool);
   });
+
+  const finalTools: unknown[] = [];
+  if (functionDeclarations.length > 0) {
+    finalTools.push({ functionDeclarations });
+  }
+  payload.tools = finalTools.concat(passthroughTools);
 
   return { toolDebugMissing, toolDebugSummaries };
 }
